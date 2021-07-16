@@ -1,7 +1,7 @@
 # PowerShell function to stop all VMs on a host, resize the VMs to a different type, move the VMs onto a new host
 # and start the VMs on a new host.
 # Move-ADHVMs {srcResourceGroup} {srcHostGroup} {srcHostName} {dstResourceGroup} {dstHostGroup} {dstHostName}
-# Author: Brittany
+# Author: Brittany Rowe
 Function Move-ADHVMs {
     [cmdletbinding()]
     Param (
@@ -23,15 +23,12 @@ Function Move-ADHVMs {
             Write-Host " Source Host was not found .. Exit"
             return
         }
-        
-        Write-Host (get-date).ToString('T') " Creating destination host and host group"
-        $DestHostGroup = New-AzHostGroup -Location $Location -Name NewHG -PlatformFaultDomain 1 -ResourceGroupName $DestResourceGroup -Zone 1 -SupportAutomaticPlacement true
 
         $dstHost = Get-AzHost -ResourceGroupName $DestResourceGroup -HostGroupName $DestHostGroup -Name $DestHostName
-        if (!$dstHost)
+        if ($dstHost.name -notcontains $DestHostName )
         {
             Write-Host " Destination Host was not found .. Creating new Host"
-            $dstHost = New-AzHost -HostGroupName $DestHostGroup -Location $Location -Name myHost -ResourceGroupName $DestResourceGroup -Sku EASv4-Type1 -AutoReplaceOnFailure 1 -PlatformFaultDomain 1
+            $dstHost = New-AzHost -HostGroupName $DestHostGroup -Location $Location -Name $DestHostName -ResourceGroupName $DestResourceGroup -Sku EASv4-Type1 -AutoReplaceOnFailure 1 -PlatformFaultDomain 0
             return
         }
 
@@ -41,15 +38,21 @@ Function Move-ADHVMs {
             Write-Host "Iterate VM: " $vm.Id
             $strToken=$vm.Id.split("/")
             Write-Host "Stop VM: -ResourceGroupName " $strToken[4] " -name " $strToken[8]
-            Stop-AzVM -ResourceGroupName $strToken[4] -name $strToken[8] -Force -AsJob
+            Stop-AzVM -Id $vm.Id -Force -AsJob
 
-            $vm.HardwareProfile.VmSize = "E20ASv4"
-            Update-AzVM -VM $vm -ResourceGroupName $DestResourceGroup
-            Start-AzVM -ResourceGroupName $DestResourceGroup -Name $vmName
+            Get-Job | Wait-Job -Timeout 240
+
+            $vmname = Get-AzVM -ResourceGroupName $SourceResourceGroup -VMName $strToken[8]
+            
+            Write-Host "Disassociating VM from host: " vmname
+            $vmname.Host = New-Object Microsoft.Azure.Management.Compute.Models.SubResource
+            $vmname.Host.Id = ""
+            Update-AzVM -ResourceGroupName $strToken[4] -VM $vmname
+
+            Write-Host "Resizing VM: " $vmname
+            $vmname.HardwareProfile.VmSize = $DestVMSize
+            Update-AzVM -VM $vmname -ResourceGroupName $DestResourceGroup 
         }
-        Write-Host (get-date).ToString('T') ": Waiting for all jobs to complete"
-        Get-Job | Wait-Job -Timeout 180
-        Get-Job | Remove-Job
 
         Write-Host (get-date).ToString('T') ": Moving all VMs"
         foreach ($vm in $srcHost.VirtualMachines) 
@@ -68,22 +71,18 @@ Function Move-ADHVMs {
         Get-Job | Remove-Job
         
         Write-Host (get-date).ToString('T') ": Starting all VMs"
-        
-        foreach ($vm in $srcHost.VirtualMachines) 
-        {
-            Write-Host "Iterate VM: " $vm.Id
-            $strToken=$vm.Id.split("/")
-            Start-AzVM -ResourceGroupName $strToken[4] -name $strToken[8] -AsJob            
-        }
+       
+        Write-Host "Iterate VM: " $vm.Id
+        $strToken=$vm.Id.split("/")
+        Start-AzVM -Id $currVM.Id -AsJob            
+
 
         Write-Host (get-date).ToString('T') ": Waiting for all jobs to complete"
 
-        Get-Job | Wait-Job -Timeout 240
+        Get-Job | Wait-Job -Timeout 120
         Get-Job | Remove-Job
 
         Write-Host (get-date).ToString('T') ": All jobs have been completed"
-
-        Remove-AzHost -ResourceGroupName $SourceResourceGroup -Name $SourceHostName
 
     }
 }
